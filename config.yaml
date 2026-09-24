@@ -1,0 +1,85 @@
+# Central configuration for the CSET data analytics sample.
+# Every pipeline step reads this file, so the whole analysis can be re-scoped here.
+
+project:
+  title: "Mapping the Emergence of AI in Genomics and Biotechnology"
+  # OpenAlex "polite pool": requests that include an email get faster, more reliable service.
+  contact_email: "bmabvakure@gmail.com"
+
+paths:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  duckdb: "data/processed/cset_sample.duckdb"
+  figures_dir: "figures"
+
+corpus:
+  start_year: 2010
+  end_year: 2025
+  # Work types to keep (OpenAlex vocabulary). Preprints are included because
+  # AI and genomics move quickly and a lot of work first appears on bioRxiv / arXiv.
+  work_types: ["article", "preprint", "review"]
+  # Safety cap so a first run finishes quickly. Set to null to pull everything.
+  max_records: null
+
+  # The corpus is the intersection of two concept groups, searched in title + abstract.
+  ai_terms:
+    - "machine learning"
+    - "deep learning"
+    - "neural network"
+    - "artificial intelligence"
+    - "large language model"
+    - "transformer model"
+    - "random forest"
+    - "support vector machine"
+    - "convolutional neural network"
+    - "graph neural network"
+    - "foundation model"
+    - "generative model"
+  bio_terms:
+    - "genomics"
+    - "genome"
+    - "gene expression"
+    - "transcriptomics"
+    - "single-cell"
+    - "protein structure"
+    - "protein design"
+    - "CRISPR"
+    - "gene editing"
+    - "synthetic biology"
+    - "variant calling"
+    - "epigenomics"
+    - "metagenomics"
+    - "drug discovery"
+
+  # Denominator query: all genomics / biotech output, used to compute the AI share over time.
+  baseline_terms:
+    - "genomics"
+    - "genome"
+    - "transcriptomics"
+    - "CRISPR"
+    - "synthetic biology"
+    - "protein design"
+
+topics:
+  # "tfidf" (TF-IDF + truncated SVD, i.e. latent semantic analysis) or
+  # "sentence-transformers" (needs torch and access to the Hugging Face model hub).
+  embedding_backend: "tfidf"
+  embedding_model: "all-MiniLM-L6-v2"
+  n_clusters: 30
+  random_state: 42
+  # Emergence windows: compare the recent window against the earlier one.
+  # Current values match the 2010 to 2020 paper records. With records through 2025,
+  # use early_window: [2016, 2019] and recent_window: [2022, 2025].
+  early_window: [2013, 2016]
+  recent_window: [2018, 2020]
+
+entity_resolution:
+  fuzzy_threshold: 90        # rapidfuzz token_set_ratio cutoff (0 to 100)
+  holdout_size: 2000         # known matches hidden to measure precision / recall
+
+llm_classification:
+  enabled: true
+  provider: "anthropic"      # reads ANTHROPIC_API_KEY from the environment
+  model: "claude-haiku-4-5"  # any inexpensive model works; change as needed
+  sample_size: 300           # papers sent to the LLM
+  gold_size: 150             # subset you hand-label to validate the LLM

@@ -1,0 +1,22 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Data is rebuilt by the pipeline; keep the small reference table only
+data/raw/
+data/processed/
+data/labels/llm_cache.jsonl
+!data/reference/
+
+# Python / Quarto
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+/.quarto/
+report_files/
+*.log
+*.tex
+.env
+*.quarto_ipynb

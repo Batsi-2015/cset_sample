@@ -1,0 +1,628 @@
+---
+title: "Data Analytics Sample"
+subtitle: "Mapping the Emergence of AI in Genomics and Biotechnology: A Bibliometric Analysis, 2010 to 2025"
+author:
+  - name: "Batsirai Mabvakure"
+    email: "bmabvakure@gmail.com"
+date: today
+date-format: "MMMM D, YYYY"
+abstract: |
+  Prepared for the Center for Security and Emerging Technology (CSET), Walsh School of
+  Foreign Service (SFS), Georgetown University. This sample builds an end to end
+  bibliometric pipeline on open data (OpenAlex), resolves messy affiliation records,
+  detects emerging research clusters from paper text, validates LLM annotations against
+  hand labels, and translates the results into findings for a policy audience.
+format:
+  pdf:
+    documentclass: article
+    papersize: letter
+    geometry: [margin=1in]
+    fontsize: 11pt
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    colorlinks: true
+    fig-pos: "H"
+    include-in-header:
+      text: |
+        \usepackage{float}
+        \usepackage{booktabs}
+        \usepackage{fvextra}
+        \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+jupyter: python3
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{python}
+#| label: setup
+import sys, json, math
+from pathlib import Path
+sys.path.insert(0, "src")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import Markdown
+
+import report_style as rs
+from common import connect, load_config, run_sql_file, ROOT
+
+cfg = load_config()
+C = cfg["corpus"]
+T = cfg["topics"]
+con = connect(cfg, read_only=True)
+tables = set(con.execute("SELECT table_name FROM information_schema.tables").df().table_name)
+
+works_years = con.execute("SELECT MIN(year), MAX(year) FROM works").fetchone()
+p0, p1 = int(works_years[0]), int(works_years[1])   # years with full paper records
+# Paper-level queries run on the years with full records; the yearly totals cover every year.
+P = dict(start_year=p0, end_year=p1, impact_start=p0, impact_end=p1 - 1)
+manifest = json.loads((ROOT / cfg["paths"]["raw_dir"] / "fetch_manifest.json").read_text())
+
+def q(name):
+    return run_sql_file(con, name, **P)
+
+def pct(x, d=0):
+    return "n/a" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:.{d}%}"
+
+def num(x):
+    return f"{x:,.0f}"
+
+def md_table(df, **kw):
+    return Markdown(df.to_markdown(index=False, disable_numparse=True, **kw))
+
+# ---- numbers used in the text ----
+growth = run_sql_file(con, "growth_by_year", start_year=C["start_year"], end_year=C["end_year"])
+y0, y1 = C["start_year"], C["end_year"]
+g0 = growth.loc[growth.year == y0].iloc[0]
+g1 = growth.loc[growth.year == y1].iloc[0]
+n_years = y1 - y0
+cagr_ai = (g1.ai_bio / g0.ai_bio) ** (1 / n_years) - 1
+cagr_bio = (g1.bio_baseline / g0.bio_baseline) ** (1 / n_years) - 1
+
+shares = q("country_share_by_year")
+def bloc_share(year, bloc):
+    s = shares[(shares.year == year) & (shares.bloc == bloc)].share
+    return float(s.iloc[0]) if len(s) else float("nan")
+
+impact = q("country_impact")
+collab = q("collaboration")
+clusters = con.execute("SELECT * FROM clusters ORDER BY growth_ratio DESC").df()
+# Human-readable names, written after reading each cluster's terms and example papers.
+# Clusters without a name fall back to their top c-TF-IDF terms.
+NAMES = {
+    "cov / sars / covid": "COVID-19 and pandemic genomics",
+    "cell / single / seq": "Single-cell sequencing analysis",
+    "ai / health / healthcare": "AI in clinical care",
+    "tumor / cancer / immune": "Tumor immunology",
+    "risk / disease / patients": "Genetic disease risk prediction",
+    "patients / survival / cancer": "Cancer prognosis models",
+    "variants / sequencing / genome": "Variant calling and clinical sequencing",
+    "drug / discovery / prediction": "Drug target prediction",
+    "gene / classification / expression": "Microarray gene classification",
+    "protein / prediction / sequence": "Protein sequence prediction",
+    "gep / expression programming / gene expression": "Gene expression programming (false positive)",
+    "feature / selection / classification": "Feature selection for gene data",
+}
+clusters["name"] = clusters.label.map(NAMES).fillna(clusters.label)
+emerging = clusters[clusters.emerging]
+works_n = con.execute("SELECT COUNT(*) FROM works").fetchone()[0]
+declining = clusters[clusters.n_works >= 100].sort_values("growth_ratio").head(3)
+top1 = impact.set_index("bloc")
+full_record_share = works_n / growth.ai_bio.sum()
+yoy_2025 = float(growth.loc[growth.year == y1, "yoy_growth"].iloc[0])
+```
+
+# Key findings {.unnumbered}
+
+::: {.callout-note appearance="simple"}
+**Question.** How fast is artificial intelligence spreading through genomics and
+biotechnology research, which research fronts are emerging fastest, and which
+countries are producing that work?
+:::
+
+- **AI is moving from niche to mainstream in biotechnology.** AI-related genomics and
+  biotechnology papers rose from `{python} num(g0.ai_bio)` in `{python} y0` to
+  `{python} num(g1.ai_bio)` in `{python} y1`, about `{python} pct(cagr_ai)` a year,
+  roughly three times the growth rate of biotechnology research overall
+  (`{python} pct(cagr_bio)`). AI work went from `{python} pct(g0.ai_share_of_bio, 1)` to
+  `{python} pct(g1.ai_share_of_bio, 1)` of the field, and output grew
+  `{python} pct(yoy_2025)` in `{python} y1` alone.
+- **The United States leads on influence; China is closing the gap on volume.** Between
+  `{python} p0` and `{python} p1`, China's share of world output rose from
+  `{python} pct(bloc_share(p0, "China"))` to `{python} pct(bloc_share(p1, "China"))`,
+  passing the EU27 (`{python} pct(bloc_share(p1, "EU27"))`). The United States held about
+  a third of output (`{python} pct(bloc_share(p1, "United States"))` in `{python} p1`)
+  but produced `{python} pct(top1.loc["United States", "share_top1"])` of the top 1
+  percent most cited papers.
+- **Research fronts shift quickly.** Of `{python} len(clusters)` clusters detected from
+  paper text, the fastest growing between `{python} T['early_window'][0]` to
+  `{python} T['early_window'][1]` and `{python} T['recent_window'][0]` to
+  `{python} T['recent_window'][1]` were pandemic genomics (COVID-19), single-cell
+  analysis, AI in clinical care, and tumor immunology. Older approaches such as
+  microarray-based gene classification lost ground.
+- **US and China research remains intertwined.** About
+  `{python} pct(collab.us_papers_with_cn.iloc[-1])` of US papers in `{python} p1` had a
+  co-author based in China, up from `{python} pct(collab.us_papers_with_cn.iloc[0])` in
+  `{python} p0`. This is relevant to current research security debates.
+- **Data quality steps change the numbers.** An affiliation matcher, checked against a
+  hidden holdout, recovered institutions for about a quarter of the author affiliations
+  OpenAlex left unlinked, and the clustering exposed keyword false positives (Section 4).
+
+::: {.callout-important appearance="simple"}
+**Data coverage.** Yearly totals cover `{python} y0` to `{python} y1`. Full paper records
+(authors, institutions, abstracts, citations) were downloaded for `{python} p0` to
+`{python} p1`, `{python} num(works_n)` papers, before OpenAlex's free daily limit for
+requests without an API key was reached. Country, cluster, and collaboration results
+therefore describe `{python} p0` to `{python} p1`. Rerunning the same pipeline with a free
+API key extends every figure to `{python} y1` with no code changes.
+:::
+
+# Why this matters
+
+AI tools such as protein structure predictors, genomic language models, and generative
+molecule designers are changing what a small team can do in biology. That capability
+has large benefits for medicine and agriculture, and it also raises security questions:
+lower barriers to engineering biological systems, concentration of capability in a few
+countries or companies, and research security concerns around international
+collaboration. Tracking where this work is growing, and who is doing it, is a first
+step toward informed policy.
+
+This sample asks four questions:
+
+1. How quickly is AI being adopted in genomics and biotechnology research?
+2. Which research fronts within that space are emerging fastest?
+3. How is output distributed across countries, and how is collaboration changing?
+4. How reliable are the underlying data, and how much do data quality steps change the answers?
+
+# Data and methods
+
+## Data source
+
+Publication records come from **OpenAlex**, a fully open index of more than 250 million
+scholarly works with linked authors, institutions, countries, topics, and citations.
+The corpus is every article, preprint, or review from `{python} y0` to `{python} y1`
+whose title or abstract contains at least one AI term *and* at least one genomics or
+biotechnology term (full term lists in `config.yaml`). A broader biotechnology query
+serves as the denominator for adoption rates.
+
+```{python}
+#| label: tbl-corpus
+#| tbl-cap: "Corpus summary"
+corpus = pd.DataFrame({
+    "Item": ["Records matching the query in OpenAlex", "Years with yearly totals",
+             "Full records downloaded and analyzed", "Years with full records", "Retrieved"],
+    "Value": [num(manifest["records_in_openalex"]), f"{y0} to {y1}", num(works_n),
+              f"{p0} to {p1}", str(manifest["retrieved_at"])[:10]],
+})
+md_table(corpus)
+```
+
+For `{python} p0` to `{python} p1` every matching record was downloaded. The pipeline also
+supports seeded random sampling per year with sampling weights, for corpora too large to
+download in full; the weights here are close to 1.
+
+## Pipeline
+
+```{python}
+#| label: fig-pipeline
+#| fig-cap: "Data pipeline. Each box is a Python module; the same steps are orchestrated as an Airflow DAG (dags/cset_sample_dag.py)."
+#| fig-height: 1.6
+fig, ax = rs.new(figsize=(6.5, 1.5))
+ax.axis("off"); ax.grid(False)
+steps = [("Ingest", "OpenAlex\nAPI"), ("Store", "DuckDB\ntables"),
+         ("Resolve", "entity\nresolution"), ("Model", "embeddings\n+ clusters"),
+         ("Annotate", "LLM + human\nlabels"), ("Report", "SQL views\n+ Quarto")]
+w, gap = 0.145, 0.026
+for i, (head, body) in enumerate(steps):
+    x = i * (w + gap)
+    ax.add_patch(plt.Rectangle((x, 0.1), w, 0.8, facecolor="#f3f6fb", edgecolor=rs.BLUE,
+                               linewidth=1, transform=ax.transAxes))
+    ax.text(x + w / 2, 0.68, head, ha="center", va="center", fontsize=8.5,
+            weight="bold", transform=ax.transAxes)
+    ax.text(x + w / 2, 0.34, body, ha="center", va="center", fontsize=6.5,
+            color=rs.INK_2, transform=ax.transAxes)
+    if i < len(steps) - 1:
+        ax.annotate("", xy=(x + w + gap, 0.5), xytext=(x + w, 0.5), xycoords="axes fraction",
+                    arrowprops=dict(arrowstyle="->", color=rs.MUTED, lw=1))
+plt.show()
+```
+
+**Counting.** Country credit uses *fractional counting*: each paper is worth one unit,
+split equally among its authors, and an author with several country affiliations splits
+their share evenly. This avoids double counting large international collaborations.
+
+**Impact.** Highly cited work is measured with OpenAlex's field and year normalized
+citation percentile (top 10 percent flag), so older papers and high citation fields do
+not dominate. The most recent year is excluded from impact measures.
+
+**Emerging topics.** Titles and abstracts are represented with TF-IDF and reduced to
+256 dimensions with truncated SVD (latent semantic analysis), grouped with k-means into `{python} len(clusters)` clusters, and labeled with
+class-based TF-IDF terms plus the papers nearest each cluster center. A cluster is
+flagged as emerging when its share of the corpus grew in the top quartile between the
+two comparison windows (`{python} f"{T['early_window'][0]} to {T['early_window'][1]}"`
+versus `{python} f"{T['recent_window'][0]} to {T['recent_window'][1]}"`) and it has at
+least 100 papers. Each cluster was then named by reading its terms and example papers.
+
+# Findings
+
+## Adoption is accelerating
+
+```{python}
+#| label: fig-growth
+#| fig-cap: "AI in genomics and biotechnology: annual papers (left) and share of all biotechnology papers (right). Two panels are used instead of a dual axis so each measure keeps its own honest scale."
+fig, axes = rs.new(figsize=(6.5, 2.6), ncols=2)
+ax = axes[0]
+ax.plot(growth.year, growth.ai_bio, color=rs.BLUE, marker="o", markersize=3)
+ax.set_title("Papers per year")
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+ax = axes[1]
+ax.plot(growth.year, growth.ai_share_of_bio, color=rs.BLUE, marker="o", markersize=3)
+ax.set_title("Share of biotechnology output")
+rs.pct_axis(ax, decimals=0)
+for a in axes:
+    a.set_ylim(bottom=0)
+    rs.year_axis(a)
+fig.tight_layout()
+rs.source_note(fig)
+plt.show()
+```
+
+```{python}
+fast = growth[growth.year >= 2016].sort_values("yoy_growth", ascending=False).head(3)
+```
+
+Growth was steady through the early 2010s and then bent upward from about 2017, as deep
+learning frameworks matured and large public sequencing datasets became standard
+training data. The share of all biotechnology papers that use AI climbed every year in
+the series, which means AI is spreading faster than the field is growing, not simply
+riding its expansion. The largest single-year jumps came in
+`{python} ", ".join(f"{int(r.year)} (+{r.yoy_growth:.0%})" for r in fast.itertuples())`.
+The `{python} y1` jump follows the spread of protein structure prediction tools and
+genomic language models, although yearly totals alone cannot show which methods drove it.
+
+## Emerging research fronts
+
+```{python}
+#| label: fig-emergence
+#| fig-cap: "Research clusters by size and growth. Each dot is a cluster of papers grouped by text similarity. Clusters flagged as emerging are highlighted and labeled."
+fig, ax = rs.new(figsize=(6.5, 3.6))
+ax.grid(True, axis="both")
+base = clusters[~clusters.emerging]
+ax.scatter(base.n_works, base.growth_ratio, s=30, color=rs.GRAY, edgecolor="white",
+           linewidth=0.8, label="Other clusters", zorder=2)
+ax.scatter(emerging.n_works, emerging.growth_ratio, s=46, color=rs.BLUE, edgecolor="white",
+           linewidth=0.8, label="Emerging", zorder=3)
+ax.set_yscale("log")
+lab = emerging.head(6)
+ly = 10 ** rs.spread(np.log10(lab.growth_ratio), 0.09)
+for (_, r), yv in zip(lab.iterrows(), ly):
+    ax.annotate(r["name"], (r.n_works, r.growth_ratio), xytext=(r.n_works, yv),
+                textcoords="data", fontsize=7, color=rs.INK_2,
+                xycoords="data", ha="left", va="center",
+                arrowprops=dict(arrowstyle="-", color=rs.GRID, lw=0.6))
+ax.axhline(1, color=rs.MUTED, linewidth=0.8, linestyle="--")
+ax.set_xlabel("Papers in cluster")
+ax.set_ylabel("Growth in share of corpus (log scale)")
+ax.set_yticks([0.25, 0.5, 1, 2, 4])
+ax.yaxis.set_minor_formatter(plt.NullFormatter())
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}x"))
+ax.legend(loc="upper right")
+rs.source_note(fig)
+plt.show()
+```
+
+```{python}
+#| label: tbl-emerging
+#| tbl-cap: "Emerging clusters, with the paper closest to each cluster center as a human-readable example."
+ex = con.execute("""
+    SELECT cluster, FIRST(title ORDER BY rowid) AS example_title
+    FROM cluster_examples GROUP BY cluster
+""").df()
+t = emerging.merge(ex, on="cluster", how="left").head(8)
+t = pd.DataFrame({
+    "Cluster": t["name"],
+    "Top terms": t.top_terms.str.split(", ").str[:3].str.join(", "),
+    "Papers": t.n_works.map(num),
+    "Growth": t.growth_ratio.map(lambda v: f"{v:.1f}x"),
+    "Example paper": t.example_title.str.slice(0, 48).str.rstrip() + "...",
+})
+md_table(t)
+```
+
+The fastest-growing front, COVID-19 genomics, is a reminder that research priorities
+move with events: machine learning was applied to viral genome surveillance, variant
+tracking, and drug repurposing within months. Pathogen genomics is also the front with
+the most direct biosecurity relevance, since the same tools that track variants can
+inform work on transmissibility. Single-cell analysis and clinical AI grew steadily and
+are larger, which makes them durable trends rather than spikes.
+
+The clusters that lost share are informative too. *Microarray gene classification* and
+*feature selection for gene data* reflect an older generation of methods giving way to
+sequencing and deep learning. Protein sequence and structure prediction also lost share
+before `{python} p1`, just before AlphaFold2 changed the field, so extending the data to
+`{python} y1` should show a sharp reversal there. One cluster, *gene expression
+programming*, is an evolutionary computing method that matched the query only because
+its name contains "gene expression." It is a keyword false positive, and the clustering
+step surfaced it (Section 4).
+
+## Where the work is done
+
+```{python}
+#| label: fig-country-share
+#| fig-cap: "Share of world AI and biotechnology output by country bloc (fractional counting, sampling weighted)."
+fig, ax = rs.new(figsize=(6.5, 3.0))
+named = ["United States", "China", "EU27"]
+other = (shares[~shares.bloc.isin(named)].groupby("year").share.sum().reset_index())
+ax.plot(other.year, other.share, color=rs.GRAY, linewidth=1.5, label="All other countries")
+ends = [(other.year.iloc[-1], other.share.iloc[-1], "All other countries")]
+for bloc in named:
+    s = shares[shares.bloc == bloc]
+    ax.plot(s.year, s.share, color=rs.BLOC_COLORS[bloc], label=bloc)
+    ends.append((s.year.iloc[-1], s.share.iloc[-1], bloc))
+rs.pct_axis(ax)
+ax.set_ylim(bottom=0)
+ax.set_xlim(right=p1 + 2.5)
+rs.year_axis(ax)
+rs.label_line_ends(ax, ends)
+ax.legend(loc="upper left", ncols=4, bbox_to_anchor=(0, 1.12))
+rs.source_note(fig)
+plt.show()
+```
+
+```{python}
+#| label: tbl-impact
+#| tbl-cap: "Output and impact by bloc. The impact ratio compares a bloc's share of top 10 percent papers with its share of all papers; values above 1 indicate disproportionately influential work."
+t = impact.copy()
+t = pd.DataFrame({
+    "Bloc": t.bloc,
+    "Share of papers": t.share_all.map(lambda v: pct(v, 1)),
+    "Share of top 10%": t.share_top10.map(lambda v: pct(v, 1)),
+    "Share of top 1%": t.share_top1.map(lambda v: pct(v, 1)),
+    "Impact ratio": t.impact_ratio.map(lambda v: f"{v:.2f}"),
+})
+md_table(t)
+```
+
+### Who leads the emerging fronts?
+
+```{python}
+#| label: fig-cluster-mix
+#| fig-cap: "Share of output from the United States and China in each emerging cluster."
+mix = q("cluster_country_mix")
+mix = mix[mix.emerging & mix.bloc.isin(["United States", "China"])]
+mix["name"] = mix.label.map(NAMES).fillna(mix.label)
+wide = mix.pivot_table(index="name", columns="bloc", values="bloc_share").fillna(0)
+wide = wide.reindex(emerging["name"]).dropna(how="all").head(8).iloc[::-1]
+fig, ax = rs.new(figsize=(6.5, 0.45 * len(wide) + 0.9))
+ax.grid(True, axis="x"); ax.grid(False, axis="y")
+yy = np.arange(len(wide))
+h = 0.36
+for i, bloc in enumerate(["United States", "China"]):
+    if bloc in wide:
+        ax.barh(yy + (0.5 - i) * h, wide[bloc], height=h - 0.04, color=rs.BLOC_COLORS[bloc],
+                label=bloc)
+ax.set_yticks(yy, wide.index, fontsize=7.5)
+rs.pct_axis(ax, axis="x")
+ax.legend(loc="lower left", ncols=2, bbox_to_anchor=(0, 1.0))
+rs.source_note(fig)
+plt.show()
+```
+
+```{python}
+us_leads = int((wide.get("United States", 0) > wide.get("China", 0)).sum())
+cn_leads = list(wide.index[wide.get("China", 0) > wide.get("United States", 0)])
+```
+
+US institutions produce the larger share in `{python} us_leads` of the
+`{python} len(wide)` emerging fronts, most clearly in genetic disease risk prediction and
+clinical sequencing. `{python} ("China leads in " + " and ".join(n.lower() for n in cn_leads) + ", and its share is highest in cancer-focused fronts.") if cn_leads else "China does not lead any emerging front in this period."`
+Since China's overall share was still rising in `{python} p1`, this is the chart most
+likely to change when the analysis is extended to `{python} y1`.
+
+## Collaboration
+
+```{python}
+#| label: fig-collab
+#| fig-cap: "International collaboration (left) and the share of US papers that include a co-author based in China (right)."
+fig, axes = rs.new(figsize=(6.5, 2.6), ncols=2)
+axes[0].plot(collab.year, collab.intl_collab_rate, color=rs.BLUE)
+axes[0].set_title("Papers with authors in 2+ countries")
+axes[1].plot(collab.year, collab.us_papers_with_cn, color=rs.ORANGE)
+axes[1].set_title("US papers with a China-based co-author")
+for a in axes:
+    rs.pct_axis(a); a.set_ylim(bottom=0); rs.year_axis(a)
+fig.tight_layout()
+rs.source_note(fig)
+plt.show()
+```
+
+The share of papers with authors in more than one country rose from about a quarter to
+a third over the decade. US and China co-authorship rose through 2018 and then eased slightly in
+2019 and 2020, the period when US research security scrutiny increased and the pandemic
+disrupted travel. These data show timing only; they cannot separate those causes, and
+the rise of Chinese output over the same years means the absolute number of joint papers
+still grew.
+
+## Global participation: Africa
+
+```{python}
+#| label: fig-africa
+#| fig-cap: "Top African countries by fractional output, full period."
+af = q("africa").head(10).iloc[::-1]
+fig, ax = rs.new(figsize=(6.5, 0.32 * len(af) + 0.8))
+ax.grid(True, axis="x"); ax.grid(False, axis="y")
+ax.barh(af.country_name, af.output, color=rs.BLUE, height=0.62)
+for yv, (v, s) in enumerate(zip(af.output, af.world_share)):
+    ax.text(v, yv, f"  {pct(s, 2)} of world", va="center", fontsize=7, color=rs.INK_2)
+ax.set_xlabel("Fractional papers (weighted)")
+ax.set_xlim(right=af.output.max() * 1.3)
+rs.source_note(fig)
+plt.show()
+afr = q("africa_trend")
+```
+
+African institutions account for `{python} pct(afr.africa_share.iloc[-1], 1)` of world
+output in `{python} p1`, led by Egypt, South Africa, and Nigeria, and
+`{python} pct(afr.africa_with_external_partner.iloc[-1])` of African-authored papers that
+year include a partner outside the continent. The continent holds the world's greatest
+human genetic diversity, yet contributes little of the AI research built on genomic
+data. Genomic
+AI models trained mostly on data from European-ancestry populations can perform worse
+for others, so where this research is done, and with whose data, is a question of
+both equity and scientific quality.
+
+# Data quality and validation
+
+## Affiliation entity resolution
+
+```{python}
+#| label: tbl-er
+#| tbl-cap: "Entity resolution accuracy on a holdout of affiliation strings with a known institution, hidden from the matcher before matching."
+ev = con.execute("SELECT * FROM er_evaluation").df()
+md_table(pd.DataFrame({
+    "Method": ev.method.map({"overall": "All methods", "exact_alias": "Exact alias match",
+                             "fuzzy_name": "Fuzzy name match"}), "Predicted": ev.n_predicted.map(num),
+    "Correct": ev.n_correct.map(num),
+    "Precision": ev.precision.map(lambda v: pct(v, 1)),
+    "Recall": ev.recall.map(lambda v: pct(v, 1)),
+}))
+```
+
+```{python}
+#| label: tbl-er-coverage
+#| tbl-cap: "Outcome for affiliation strings that OpenAlex left unresolved."
+cov = con.execute("SELECT * FROM er_coverage").df()
+OUTCOME = {"unresolved": "Still unresolved", "exact_alias": "Exact alias match",
+           "fuzzy_name": "Fuzzy name match", "overall": "All methods"}
+md_table(pd.DataFrame({"Outcome": cov.method.map(OUTCOME), "Strings": cov.n.map(num),
+                       "Share of unresolved": cov.share_of_unresolved.map(lambda v: pct(v, 1))}))
+```
+
+```{python}
+recovered = con.execute("""
+    SELECT SUM(CASE WHEN source = 'recovered' THEN weight END) / SUM(weight)
+    FROM author_countries_enriched
+""").fetchone()[0] or 0
+reg = con.execute("""
+    SELECT source,
+           SUM(CASE WHEN r.region IN ('North America', 'Europe') THEN weight ELSE 0 END) / SUM(weight) AS na_eu
+    FROM author_countries_enriched a LEFT JOIN country_regions r USING (country_code)
+    GROUP BY source
+""").df().set_index("source").na_eu
+```
+
+```{python}
+er_all = ev.set_index("method")
+cov_i = cov.set_index("method")
+```
+
+On the holdout, the fuzzy matcher was right `{python} pct(er_all.loc["overall", "precision"])`
+of the time when it made a match, and it matched `{python} pct(er_all.loc["overall", "recall"])`
+of strings. That trade-off is deliberate: a wrong institution is worse than a missing one,
+so the threshold favors precision. Applied to strings OpenAlex left unlinked, it recovered
+`{python} pct(1 - cov_i.loc["unresolved", "share_of_unresolved"])` of them.
+Recovered links add `{python} pct(recovered, 1)` to total country credit. Without this
+step, those authors would silently drop out of every country statistic above, and the
+loss is not evenly spread. Only `{python} pct(reg.get("recovered", float("nan")))` of the
+recovered credit belongs to North America and Europe, compared with
+`{python} pct(reg.get("openalex", float("nan")))` of the credit OpenAlex links itself, so
+unlinked affiliations come disproportionately from the rest of the world. Small as the
+total is, skipping this step would bias country comparisons against exactly the regions
+that are hardest to measure.
+
+## LLM-assisted annotation
+
+```{python}
+#| label: tbl-llm
+#| tbl-cap: "LLM annotation quality. Query precision is the share of keyword matches the LLM judged to be real AI research; agreement metrics compare LLM labels with hand labels."
+if "llm_eval" in tables:
+    le = con.execute("SELECT * FROM llm_eval").df()
+    le_t = pd.DataFrame({
+        "Metric": le.metric.str.replace("_", " "),
+        "Value": le.value.map(lambda v: "n/a" if pd.isna(v) else f"{v:.2f}"),
+        "95% CI": [("" if pd.isna(a) else f"{a:.2f} to {b:.2f}") for a, b in zip(le.ci_low, le.ci_high)],
+        "n": le.n,
+    })
+    out = md_table(le_t)
+else:
+    out = Markdown("*Not yet run for this version. The code, prompt, sampling, and scoring are "
+                   "in `src/llm_classify.py`; running it needs an API key and about an hour of "
+                   "hand labeling.*")
+out
+```
+
+The design labels a random sample of `{python} cfg["llm_classification"]["sample_size"]`
+papers with an LLM as developing an AI method, applying existing AI tools, or not
+substantively about AI, and flags pathogen or dual-use biology. A subset of
+`{python} cfg["llm_classification"]["gold_size"]` is labeled by hand to measure agreement,
+with Cohen's kappa to correct for chance, and per-class precision and recall. The share
+judged "not AI" estimates the keyword query's false positive rate with a confidence
+interval. The LLM is treated as a measurement instrument whose error rate is reported,
+not as ground truth. The gene expression programming cluster above shows why this step
+matters.
+
+## Language coverage
+
+```{python}
+#| label: tbl-lang
+#| tbl-cap: "Publication language of the corpus."
+lang = q("language").head(6)
+md_table(pd.DataFrame({"Language": lang.language, "Share": lang.share.map(lambda v: pct(v, 1))}))
+```
+
+Nearly all records are in English. OpenAlex is English dominant, and the search terms
+are English, so research published
+only in Chinese, Japanese, Korean, or other languages is undercounted. A natural
+extension is to add translated search terms and non-English sources, which matters most
+for estimates of Chinese output.
+
+# Limitations
+
+- **Partial paper-level coverage.** Country, cluster, and collaboration results cover
+  `{python} p0` to `{python} p1`, about `{python} pct(full_record_share)` of all papers
+  that match the query; `{python} y1 - p1` more years of records are needed to see the
+  post-2020 surge at paper level.
+- **Keyword definition.** The corpus depends on the term lists. The false positives found
+  here (gene expression programming) show that noise exists, and false negatives (AI
+  papers that avoid these terms) are not measured.
+- **Coverage.** OpenAlex coverage of abstracts, affiliations, and non-English venues is
+  incomplete and has improved over time, which can create artificial trends.
+- **Citation lag.** Recent papers have had less time to be cited; the latest year is
+  excluded from impact measures and normalized percentiles are used.
+- **Topic model.** Clusters use TF-IDF and latent semantic analysis. Neural sentence
+  embeddings (supported in the code) usually give cleaner clusters.
+- **Text clusters are not citation clusters.** Clusters reflect shared vocabulary.
+  Citation-based clustering, as in CSET's Map of Science, would capture intellectual
+  lineage more directly.
+- **Fractional counts reflect affiliation, not nationality** of researchers.
+
+# Reproducibility and scaling
+
+All code is in a public GitHub repository: <https://github.com/Batsi-2015/cset_sample>.
+One command (`python src/run_pipeline.py`) rebuilds every table, and
+`quarto render` rebuilds this report. The pipeline is written so each step maps cleanly
+onto a production stack:
+
+| Local version | Production equivalent |
+|---|---|
+| `run_pipeline.py` | Airflow DAG (`dags/cset_sample_dag.py`) on Cloud Composer |
+| Raw JSONL files | Google Cloud Storage bucket |
+| DuckDB | BigQuery (views in `sql/` port with minor dialect changes) |
+| Quality checks task | Airflow task that fails the run on bad data |
+
+# Appendix: selected SQL {.unnumbered}
+
+```{python}
+#| output: asis
+for name in ["views", "country_impact"]:
+    sql = (ROOT / "sql" / f"{name}.sql").read_text()
+    print(f"**sql/{name}.sql**\n\n```sql\n{sql}\n```\n")
+```
+
+```{python}
+con.close()
+```
