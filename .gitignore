@@ -6,7 +6,6 @@
 # Data is rebuilt by the pipeline; keep the small reference table only
 data/raw/
 data/processed/
-data/labels/llm_cache.jsonl
 !data/reference/
 
 # Python / Quarto

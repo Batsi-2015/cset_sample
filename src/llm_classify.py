@@ -151,13 +151,26 @@ def cmd_run(cfg: dict) -> None:
     if labels.empty:
         log.info("No LLM labels yet")
         return
-    labels["model"] = lc["model"]
+    if "model" not in labels:
+        labels["model"] = lc["model"]
+    labels["model"] = labels["model"].fillna(lc["model"])
 
     # Keyword-query precision: how many retrieved papers are really about AI?
     n = len(labels)
     k = int((labels.ai_role != "not_ai").sum())
     lo, hi = wilson(k, n)
     rows = [{"metric": "query_precision_llm", "value": k / n, "ci_low": lo, "ci_high": hi, "n": n}]
+    if "off_topic" in labels:
+        # Stricter precision: about AI *and* about biology (not, e.g., materials science).
+        k2 = int(((labels.ai_role != "not_ai") & ~labels.off_topic.fillna(False).astype(bool)).sum())
+        lo2, hi2 = wilson(k2, n)
+        rows.append({"metric": "query_precision_ai_and_bio", "value": k2 / n,
+                     "ci_low": lo2, "ci_high": hi2, "n": n})
+    if "biosecurity" in labels:
+        k3 = int(labels.biosecurity.fillna(False).astype(bool).sum())
+        lo3, hi3 = wilson(k3, n)
+        rows.append({"metric": "share_biosecurity_relevant", "value": k3 / n,
+                     "ci_low": lo3, "ci_high": hi3, "n": n})
 
     gold_path = LABEL_DIR / "gold_labels.csv"
     if gold_path.exists():

@@ -10,8 +10,9 @@ abstract: |
   Prepared for the Center for Security and Emerging Technology (CSET), Walsh School of
   Foreign Service (SFS), Georgetown University. This sample builds an end to end
   bibliometric pipeline on open data (OpenAlex), resolves messy affiliation records,
-  detects emerging research clusters from paper text, validates LLM annotations against
-  hand labels, and translates the results into findings for a policy audience.
+  detects emerging research clusters from paper text, uses an LLM (Claude) to annotate a
+  random sample and measure how clean the corpus is, and translates the results into
+  findings for a policy audience.
 format:
   pdf:
     documentclass: article
@@ -114,6 +115,8 @@ declining = clusters[clusters.n_works >= 100].sort_values("growth_ratio").head(3
 top1 = impact.set_index("bloc")
 full_record_share = works_n / growth.ai_bio.sum()
 yoy_2025 = float(growth.loc[growth.year == y1, "yoy_growth"].iloc[0])
+_le = con.execute("SELECT * FROM llm_eval").df().set_index("metric").value if "llm_eval" in tables else {}
+noise = 1 - _le["query_precision_ai_and_bio"] if len(_le) else float("nan")
 ```
 
 # Key findings {.unnumbered}
@@ -148,9 +151,10 @@ countries are producing that work?
   `{python} pct(collab.us_papers_with_cn.iloc[-1])` of US papers in `{python} p1` had a
   co-author based in China, up from `{python} pct(collab.us_papers_with_cn.iloc[0])` in
   `{python} p0`. This is relevant to current research security debates.
-- **Data quality steps change the numbers.** An affiliation matcher, checked against a
-  hidden holdout, recovered institutions for about a quarter of the author affiliations
-  OpenAlex left unlinked, and the clustering exposed keyword false positives (Section 4).
+- **Data quality steps change the numbers.** Claude's annotation of a random sample
+  suggests about `{python} pct(noise)` of keyword matches are not really AI biology research, and an
+  affiliation matcher, checked against a hidden holdout, recovered institutions for about
+  a quarter of the author affiliations OpenAlex left unlinked (Section 4).
 
 ::: {.callout-important appearance="simple"}
 **Data coverage.** Yearly totals cover `{python} y0` to `{python} y1`. Full paper records
@@ -536,34 +540,101 @@ that are hardest to measure.
 
 ## LLM-assisted annotation
 
+A random sample of `{python} cfg["llm_classification"]["sample_size"]` papers (seeded, so
+it can be redrawn exactly) was annotated by Claude from each title and abstract, using
+the label scheme in `src/llm_classify.py`: does the paper *develop* an AI method, *apply*
+existing AI tools, or is AI incidental or absent? Each paper also received a biology area
+and a flag for pathogen or other dual-use biology, and records outside biology entirely
+were marked off topic.
+
 ```{python}
 #| label: tbl-llm
-#| tbl-cap: "LLM annotation quality. Query precision is the share of keyword matches the LLM judged to be real AI research; agreement metrics compare LLM labels with hand labels."
-if "llm_eval" in tables:
-    le = con.execute("SELECT * FROM llm_eval").df()
-    le_t = pd.DataFrame({
-        "Metric": le.metric.str.replace("_", " "),
-        "Value": le.value.map(lambda v: "n/a" if pd.isna(v) else f"{v:.2f}"),
-        "95% CI": [("" if pd.isna(a) else f"{a:.2f} to {b:.2f}") for a, b in zip(le.ci_low, le.ci_high)],
-        "n": le.n,
-    })
-    out = md_table(le_t)
+#| tbl-cap: "Corpus quality estimated from the annotated sample. Intervals are 95 percent Wilson confidence intervals."
+le = con.execute("SELECT * FROM llm_eval").df() if "llm_eval" in tables else pd.DataFrame()
+lab = con.execute("SELECT * FROM llm_labels").df() if "llm_labels" in tables else pd.DataFrame()
+METRIC = {"query_precision_llm": "Share of papers that are substantively about AI",
+          "query_precision_ai_and_bio": "Share about AI and about biology",
+          "share_biosecurity_relevant": "Share involving pathogens or dual-use biology",
+          "agreement_with_human": "Agreement with hand labels", "cohen_kappa": "Cohen's kappa"}
+if len(le):
+    le = le[le.metric.isin(METRIC)]
+    out = md_table(pd.DataFrame({
+        "Measure": le.metric.map(METRIC),
+        "Estimate": le.value.map(lambda v: pct(v, 1) if v <= 1 else f"{v:.2f}"),
+        "95% CI": [f"{pct(a, 1)} to {pct(b, 1)}" if pd.notna(a) else "" for a, b in zip(le.ci_low, le.ci_high)],
+        "n": le.n.astype(int).astype(str),
+    }))
 else:
-    out = Markdown("*Not yet run for this version. The code, prompt, sampling, and scoring are "
-                   "in `src/llm_classify.py`; running it needs an API key and about an hour of "
-                   "hand labeling.*")
+    out = Markdown("*Annotation not yet run.*")
 out
 ```
 
-The design labels a random sample of `{python} cfg["llm_classification"]["sample_size"]`
-papers with an LLM as developing an AI method, applying existing AI tools, or not
-substantively about AI, and flags pathogen or dual-use biology. A subset of
-`{python} cfg["llm_classification"]["gold_size"]` is labeled by hand to measure agreement,
-with Cohen's kappa to correct for chance, and per-class precision and recall. The share
-judged "not AI" estimates the keyword query's false positive rate with a confidence
-interval. The LLM is treated as a measurement instrument whose error rate is reported,
-not as ground truth. The gene expression programming cluster above shows why this step
-matters.
+```{python}
+#| label: fig-llm
+#| fig-cap: "Annotated sample: role of AI in each paper (left) and biology area among papers that use AI (right)."
+if len(lab):
+    ROLE = {"ai_method": "Develops AI method", "ai_application": "Applies AI tools",
+            "not_ai": "AI incidental or absent"}
+    AREA = {"genomics_transcriptomics": "Genomics and transcriptomics",
+            "clinical_genomics": "Clinical and cancer genomics", "drug_discovery": "Drug discovery",
+            "protein_structure_design": "Protein structure and design",
+            "gene_editing_synbio": "Gene editing and synthetic biology", "other": "Other"}
+    roles = lab.ai_role.map(ROLE).value_counts().reindex(list(ROLE.values())).fillna(0)
+    areas = lab[lab.ai_role != "not_ai"].bio_area.map(AREA).value_counts()
+    areas = areas.reindex([a for a in AREA.values() if a in areas.index and a != "Other"] + ["Other"]).dropna()
+    fig, axes = rs.new(figsize=(6.5, 2.4), ncols=2, gridspec_kw={"width_ratios": [1, 1.3]})
+    for ax, ser, colors in [(axes[0], roles, [rs.BLUE, rs.BLUE, rs.GRAY]),
+                            (axes[1], areas, [rs.BLUE] * (len(areas) - 1) + [rs.GRAY])]:
+        ser = ser.iloc[::-1]; colors = colors[::-1]
+        ax.barh(ser.index, ser.values, color=colors, height=0.62)
+        ax.grid(True, axis="x"); ax.grid(False, axis="y")
+        for yv, v in enumerate(ser.values):
+            ax.text(v, yv, f" {int(v)}", va="center", fontsize=7, color=rs.INK_2)
+        ax.set_xlim(right=ser.max() * 1.18)
+        ax.tick_params(axis="y", labelsize=7.5)
+    axes[0].set_title("Role of AI (papers)")
+    axes[1].set_title("Biology area, AI papers")
+    fig.tight_layout()
+    rs.source_note(fig, "Source: OpenAlex; annotation by Claude; analysis by the author.")
+    plt.show()
+```
+
+```{python}
+if len(lab):
+    lm = le.set_index("metric").value
+    n_not = int((lab.ai_role == "not_ai").sum())
+    n_off = int(lab.off_topic.sum()) if "off_topic" in lab else 0
+    n_bio = int(lab.biosecurity.sum())
+    n_meta = int(lab.metadata_problem.sum()) if "metadata_problem" in lab else 0
+    method_share = (lab.ai_role == "ai_method").mean()
+```
+
+**What it shows.** About `{python} pct(lm["query_precision_llm"])` of keyword matches are
+substantively about AI, and `{python} pct(lm["query_precision_ai_and_bio"])` are about both
+AI and biology. The `{python} n_not` "incidental" papers are mostly reviews, commentaries,
+and wet-lab studies that mention machine learning once, or use "neural network" to mean
+the brain. `{python} n_off` more are AI papers with no biology at all (steel alloy design,
+materials informatics, railway maintenance) that matched through phrases such as
+"materials genome" or "gene expression programming", confirming what the clustering
+suggested. `{python} n_meta` records had a broken abstract (a journal table of contents,
+or an abstract from a different paper). Among AI papers, method development
+(`{python} pct(method_share)` of the sample) and application are roughly balanced.
+`{python} n_bio` papers (`{python} pct(lm["share_biosecurity_relevant"], 1)`) involve
+pathogens, mostly viral genome classification and bacterial virulence or strain typing.
+
+**What it means for the numbers above.** About `{python} pct(noise)` of the papers behind
+the yearly counts in Section 3.1 are not AI biology research, so levels are overstated.
+If that error rate is stable over time, growth rates and country shares are largely
+unaffected, but that should be checked year by year before it is assumed.
+
+**Validation still to do.** An LLM's labels are a measurement, not ground truth. The
+pipeline writes a template of `{python} cfg["llm_classification"]["gold_size"]` sampled
+papers (`data/labels/gold_labels.csv`) for hand labeling by a domain expert; rerunning
+`python src/llm_classify.py run` then reports agreement, Cohen's kappa, and per-class
+precision and recall in this table. Until that is done, the estimates above should be
+read as Claude's judgment, not as validated rates. These labels were produced by Claude
+within the analysis session; the scripted version sends the same prompt through the
+Anthropic API so the step can be rerun at scale.
 
 ## Language coverage
 
@@ -586,9 +657,10 @@ for estimates of Chinese output.
   `{python} p0` to `{python} p1`, about `{python} pct(full_record_share)` of all papers
   that match the query; `{python} y1 - p1` more years of records are needed to see the
   post-2020 surge at paper level.
-- **Keyword definition.** The corpus depends on the term lists. The false positives found
-  here (gene expression programming) show that noise exists, and false negatives (AI
-  papers that avoid these terms) are not measured.
+- **Keyword definition.** The corpus depends on the term lists. About `{python} pct(noise)` of
+  matches are not substantively about AI or biology (Section 4.2), and false negatives
+  (AI papers that avoid these terms) are not measured.
+- **Annotation not yet validated.** LLM labels have not yet been compared with hand labels.
 - **Coverage.** OpenAlex coverage of abstracts, affiliations, and non-English venues is
   incomplete and has improved over time, which can create artificial trends.
 - **Citation lag.** Recent papers have had less time to be cited; the latest year is
